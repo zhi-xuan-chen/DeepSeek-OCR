@@ -1,0 +1,10 @@
+transformers>=4.41.0
+peft>=0.11.0
+accelerate>=0.34.0
+safetensors>=0.4.3
+huggingface_hub>=0.24.6
+pillow>=10.3.0
+numpy>=1.26.4
+datasets>=2.20.0
+# 可选：低显存量化加载
+bitsandbytes>=0.43.1

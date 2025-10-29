@@ -258,6 +258,7 @@ class DeepseekOCRMultiModalProcessor(
     DeepseekOCRMultiModalProcessor,
     info=DeepseekOCRProcessingInfo,
     dummy_inputs=DeepseekOCRDummyInputsBuilder)
+
 class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
