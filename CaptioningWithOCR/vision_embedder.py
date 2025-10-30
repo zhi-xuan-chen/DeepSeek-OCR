@@ -1,133 +1,93 @@
-import os
-from typing import Tuple, List
-
-import torch
+import clip
 import torch.nn as nn
-from PIL import Image, ImageOps
+from transformers import CLIPVisionModel, CLIPModel, CLIPImageProcessor, CLIPVisionConfig
+from transformers import SiglipProcessor, SiglipModel, SiglipImageProcessor, SiglipTokenizer
+from einops import rearrange, repeat
+from timm.models.vision_transformer import Attention, vit_base_patch16_224
+import torch
+from PIL import Image
+from torchvision import transforms as T
 
-from deepencoder.sam_vary_sdpa import build_sam_vit_b
-from deepencoder.clip_sdpa import build_clip_l
-from deepencoder.build_linear import MlpProjector
-from addict import Dict
+class _SimpleImageProcessor:
+    """最小可用的图像处理器：Resize->ToTensor->Normalize（单通道）。
 
-from process.image_process import DeepseekOCRProcessor, dynamic_preprocess
+    - 将输入 PIL.Image 转为灰度，Resize 到 224
+    - 转 tensor 并按均值/方差归一化（mean=0.5, std=0.5）
+    - 返回 dict，其中 "pixel_values" 形状为 [1, 1, 224, 224]
+    """
 
-IMAGE_SIZE = 512
-BASE_SIZE = 512
+    def __init__(self, size: int = 224) -> None:
+        self.size = size
+        self.transform = T.Compose([
+            T.Resize((size, size), interpolation=T.InterpolationMode.BICUBIC),
+            T.ToTensor(),
+        ])
 
+    def __call__(self, images: Image.Image):
+        if not isinstance(images, Image.Image):
+            raise TypeError("images 需要是 PIL.Image")
+        pixel = self.transform(images)  # [1, H, W]
+        return pixel
 
-class VisionBackbone(nn.Module):
-    def __init__(self, n_embed: int = 1280):
+class XRCLIP(nn.Module):
+    def __init__(self,):
         super().__init__()
-        self.sam_model = build_sam_vit_b()
-        self.vision_model = build_clip_l()
-        self.projector = MlpProjector(Dict(projector_type="linear", input_dim=2048, n_embed=n_embed))
-        # special tokens following deepseek_ocr.py
-        embed_std = 1 / torch.sqrt(torch.tensor(n_embed, dtype=torch.float32))
-        self.image_newline = nn.Parameter(torch.randn(n_embed) * embed_std)
-        self.view_seperator = nn.Parameter(torch.randn(n_embed) * embed_std)
+        self.model = vit_base_patch16_224(in_chans=1)
+        self.model.head = nn.Identity()
+        self.model.load_state_dict(torch.load('/jhcnas5/chenzhixuan/checkpoints/VIRAL/XR_clip.ckpt'), strict=True)
+        self.model.to(torch.float32)
+        
+    def forward(self, images: torch.Tensor) -> torch.Tensor:  
+        images = images.unsqueeze(0)
+        
+        if images.shape[1] == 3:
+            images = images[:, 0:1, :, :]  # Take first channel and keep dim [B, 1, H, W]
+        else:
+            images = images
+
+        all_tokens = self.model.forward_features(images) # [B, 197, 768]
+        patch_tokens = all_tokens[:, 1:, :] # [B, 768]
+
+        return patch_tokens
+
+def load_clip_vision(device: str = "cuda"):
+
+    device_resolved = device if (device == "cpu" or torch.cuda.is_available()) else "cpu"
+    model = XRCLIP().to(device_resolved)
+    model.eval()
+    return model, device_resolved
+
+
+@torch.no_grad()
+def extract_clip_patch_tokens(img: Image.Image, model: XRCLIP, processor: _SimpleImageProcessor, device: str = "cuda") -> torch.Tensor:
+    """对单张 PIL Image 在线提取视觉 patch token 特征，返回 [N, C] 张量。
+
+    说明：取 vision_model 的 last_hidden_state 去掉 cls（索引 0），仅保留 patch token。
+    """
+    pixel_values = processor(img)  # 形状 [1, H, W]
+    vm_out = model(pixel_values.to(device))
+    return vm_out.cpu().contiguous()  # [N, C]
+
+
+def extract_clip_patch_tokens_from_path(image_path: str, model: XRCLIP, processor: _SimpleImageProcessor, device: str = "cuda") -> torch.Tensor:
+    """对图片路径在线提取 patch token 特征，返回 [N, C]。"""
+    img = Image.open(image_path).convert("RGB")
+    return extract_clip_patch_tokens(img, model, processor, device)
+
+
+class CLIPPatchExtractor:
+    """可复用的在线提取器：训练时常驻内存，反复调用 __call__ 即可。"""
+
+    def __init__(self, model_name: str = "openai/clip-vit-large-patch14", device: str = "cuda") -> None:
+        self.model, self.device = load_clip_vision(device)
+        
+        self.processor = _SimpleImageProcessor()
 
     @torch.no_grad()
-    def forward(self, image: Image.Image, crop_mode: bool = True) -> Tuple[torch.Tensor, int]:
-        """
-        Returns:
-            embeddings: [num_img_tokens, n_embed]
-            num_tokens: int
-        """
-        device = next(self.parameters()).device
-        processor = DeepseekOCRProcessor()
-
-        # compute crops consistent with processor
-        if image.size[0] <= 640 and image.size[1] <= 640:
-            crop_ratio = [1, 1]
-            images_crop_raw = []
+    def __call__(self, img_or_path) -> torch.Tensor:
+        if isinstance(img_or_path, Image.Image):
+            return extract_clip_patch_tokens(img_or_path, self.model, self.processor, self.device)
+        elif isinstance(img_or_path, str):
+            return extract_clip_patch_tokens_from_path(img_or_path, self.model, self.processor, self.device)
         else:
-            if crop_mode:
-                images_crop_raw, crop_ratio = dynamic_preprocess(image, image_size=IMAGE_SIZE)
-            else:
-                crop_ratio = [1, 1]
-                images_crop_raw = []
-
-        # global view
-        global_view = ImageOps.pad(image, (BASE_SIZE, BASE_SIZE),
-                                   color=tuple(int(x * 255) for x in processor.image_transform.mean))
-        global_tensor = processor.image_transform(global_view).unsqueeze(0).to(device)
-
-        # local views
-        local_tensors: List[torch.Tensor] = []
-        if images_crop_raw:
-            for im in images_crop_raw:
-                local_tensors.append(processor.image_transform(im))
-        if len(local_tensors) > 0:
-            local_tensor = torch.stack(local_tensors, dim=0).to(device)
-        else:
-            local_tensor = torch.zeros((1, 3, IMAGE_SIZE, IMAGE_SIZE), device=device)
-
-        # encode
-        local_features_1 = self.sam_model(local_tensor)
-        local_features_2 = self.vision_model(local_tensor, local_features_1)
-        local_features = torch.cat((local_features_2[:, 1:], local_features_1.flatten(2).permute(0, 2, 1)), dim=-1)
-        local_features = self.projector(local_features)
-
-        global_features_1 = self.sam_model(global_tensor)
-        global_features_2 = self.vision_model(global_tensor, global_features_1)
-        global_features = torch.cat((global_features_2[:, 1:], global_features_1.flatten(2).permute(0, 2, 1)), dim=-1)
-        global_features = self.projector(global_features)
-
-        # layout to 2D + separators
-        _, hw, n_dim = global_features.shape
-        h = w = int(hw ** 0.5)
-        num_width_tiles, num_height_tiles = crop_ratio
-
-        global_features = global_features.view(h, w, n_dim)
-        global_features = torch.cat(
-            [global_features, self.image_newline[None, None, :].expand(h, 1, n_dim)], dim=1
-        )
-        global_features = global_features.view(-1, n_dim)
-
-        if local_tensor.sum() != 0 and (num_width_tiles > 1 or num_height_tiles > 1):
-            _2, hw2, n_dim2 = local_features.shape
-            h2 = w2 = int(hw2 ** 0.5)
-            local_features = local_features.view(num_height_tiles, h2, num_width_tiles, w2, n_dim2) \
-                                         .permute(0, 2, 1, 3, 4).reshape(num_height_tiles * h2, num_width_tiles * w2, n_dim2)
-            local_features = torch.cat(
-                [local_features, self.image_newline[None, None, :].expand(num_height_tiles * h2, 1, n_dim2)], dim=1
-            ).view(-1, n_dim2)
-            vision_seq = torch.cat([local_features, global_features, self.view_seperator[None, :]], dim=0)
-        else:
-            vision_seq = torch.cat([global_features, self.view_seperator[None, :]], dim=0)
-
-        # num image tokens consistent with processor.tokenize_with_images
-        num_queries = (IMAGE_SIZE // 16 + (1 if IMAGE_SIZE % 16 else 0)) // 4
-        num_queries_base = (BASE_SIZE // 16 + (1 if BASE_SIZE % 16 else 0)) // 4
-        num_img_tokens = (num_queries_base + 1) * num_queries_base + 1
-        if num_width_tiles > 1 or num_height_tiles > 1:
-            num_img_tokens += ((num_queries * num_width_tiles) + 1) * (num_queries * num_height_tiles)
-
-        assert vision_seq.shape[0] == num_img_tokens, f"vision tokens {vision_seq.shape[0]} != expected {num_img_tokens}"
-        return vision_seq, num_img_tokens
-
-
-def load_backbone_from_pretrained(model_id: str, device: str = "cuda") -> VisionBackbone:
-    # We only need parts of weights from deepseek-ai/DeepSeek-OCR state dict
-    model = VisionBackbone().to(device)
-    from huggingface_hub import snapshot_download
-    from safetensors.torch import load_file
-
-    # try to load safetensors
-    local_dir = snapshot_download(model_id)
-    # find model*.safetensors
-    candidates = [p for p in os.listdir(local_dir) if p.endswith(".safetensors")]
-    if len(candidates) == 0:
-        raise FileNotFoundError("No .safetensors found in pretrained repo")
-    state = load_file(os.path.join(local_dir, candidates[0]))
-
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            # map names similar to deepseek_ocr.load_weights but for encoder parts
-            # expected prefixes as in original model: model.sam_model, model.vision_model, model.projector, model.image_newline, model.view_seperator
-            key = f"model.{name}"
-            if key in state:
-                param.copy_(state[key].to(param.device).to(param.dtype))
-    model.eval()
-    return model
+            raise TypeError("img_or_path 必须是 PIL.Image 或 字符串路径")

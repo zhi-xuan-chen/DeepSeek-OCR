@@ -383,6 +383,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
 
         with torch.no_grad():
+            print('images_spatial_crop.shape: ', images_spatial_crop.shape)
             for jdx in range(images_spatial_crop.size(0)):
                 # with torch.set_grad_enabled(False):
                 patches = images_crop[jdx][0].to(torch.bfloat16) # batch_size = 1
@@ -461,7 +462,12 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
                     global_features = global_features.view(-1, n_dim)
 
+                    print('global_features.shape: ', global_features.shape)
+                    print('self.view_seperator.shape: ', self.view_seperator.shape)
+
                     global_local_features = torch.cat([global_features, self.view_seperator[None, :]], dim=0)
+
+                    print('global_local_features.shape: ', global_local_features.shape)
 
                 images_in_this_batch.append(global_local_features)
 
@@ -483,6 +489,8 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # images_crop = image_input[1]
         images_spatial_crop = image_input[2].to(dtype=torch.long)
 
+        print(images_crop)
+
         # local_start = time.time()
         vision_features = self._pixel_values_to_embedding(
             pixel_values=pixel_values, images_crop = images_crop,  images_spatial_crop=images_spatial_crop)
@@ -502,6 +510,8 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if image_input is None:
             return None
         vision_embeddings = self._process_image_input(image_input)
+        print('vision_embeddings.shape: ', len(vision_embeddings))
+        print('vision_embeddings[0].shape: ', vision_embeddings[0].shape)
         return vision_embeddings
     
 

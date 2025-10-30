@@ -1,5 +1,7 @@
 import json
 from typing import Dict, Any
+import os
+import numpy as np
 
 import torch
 from torch.utils.data import Dataset
@@ -9,10 +11,10 @@ class Stage1Pairs(Dataset):
     """
     期望 jsonl 行格式：
       {
-        "clip_feat": "/abs/path/to/clip_patches.pt",   # [S, Din]
-        "ocr_feat":  "/abs/path/to/ocr_tokens.pt"      # [T, Dout]
+        "clip_feat": "/abs/path/to/clip_patches.npy",   # [S, Din]
+        "ocr_feat":  "/abs/path/to/ocr_tokens.npy"      # [T, Dout]
       }
-    可先离线用 DeepSeek-OCR 的视觉编码器把“文字图片”编码为视觉 tokens 保存为 .pt。
+    可先离线用 DeepSeek-OCR 的视觉编码器把“文字图片”编码为视觉 tokens 保存为 .npy。
     """
 
     def __init__(self, manifest: str, max_src: int, max_tgt: int):
@@ -28,8 +30,18 @@ class Stage1Pairs(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         rec = self.items[idx]
-        clip_feat = torch.load(rec["clip_feat"])  # [S, Din]
-        ocr_feat = torch.load(rec["ocr_feat"])    # [T, Dout]
+        clip_path = rec["clip_feat"]
+        ocr_path = rec["ocr_feat"]
+
+        if isinstance(clip_path, str) and clip_path.lower().endswith('.npy'):
+            clip_feat = torch.from_numpy(np.load(clip_path))
+        else:
+            clip_feat = torch.load(clip_path)
+
+        if isinstance(ocr_path, str) and ocr_path.lower().endswith('.npy'):
+            ocr_feat = torch.from_numpy(np.load(ocr_path))
+        else:
+            ocr_feat = torch.load(ocr_path)
 
         # truncate
         clip_feat = clip_feat[: self.max_src]

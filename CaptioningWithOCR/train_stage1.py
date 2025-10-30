@@ -37,8 +37,6 @@ def train_loop(cfg: Stage1Config) -> None:
         dropout=cfg.dropout,
     ).cuda()
 
-    # encoder 类型已移除，默认使用查询式 decoder
-
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.wd)
 
     global_step = 0

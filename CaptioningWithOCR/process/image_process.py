@@ -6,7 +6,7 @@ import torchvision.transforms as T
 from PIL import Image, ImageOps
 from transformers import AutoProcessor, BatchFeature, LlamaTokenizerFast
 from transformers.processing_utils import ProcessorMixin
-from config import IMAGE_SIZE, BASE_SIZE, CROP_MODE, MIN_CROPS, MAX_CROPS, PROMPT, TOKENIZER
+from .config import IMAGE_SIZE, BASE_SIZE, CROP_MODE, MIN_CROPS, MAX_CROPS, PROMPT, TOKENIZER
 
 def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
     best_ratio_diff = float('inf')
