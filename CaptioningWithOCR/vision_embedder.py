@@ -37,9 +37,7 @@ class XRCLIP(nn.Module):
         self.model.load_state_dict(torch.load('/jhcnas5/chenzhixuan/checkpoints/VIRAL/XR_clip.ckpt'), strict=True)
         self.model.to(torch.float32)
         
-    def forward(self, images: torch.Tensor) -> torch.Tensor:  
-        images = images.unsqueeze(0)
-        
+    def forward(self, images: torch.Tensor) -> torch.Tensor: 
         if images.shape[1] == 3:
             images = images[:, 0:1, :, :]  # Take first channel and keep dim [B, 1, H, W]
         else:
